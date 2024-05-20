@@ -1,0 +1,15 @@
+[submodule "submodules/diff-gaussian-rasterization"]
+	path = submodules/diff-gaussian-rasterization
+	url = https://github.com/ashawkey/diff-gaussian-rasterization
+[submodule "submodules/simple-knn"]
+	path = submodules/simple-knn
+	url = https://gitlab.inria.fr/bkerbl/simple-knn.git
+[submodule "submodules/minLoRA"]
+	path = submodules/minLoRA
+	url = https://github.com/cccntu/minLoRA
+[submodule "submodules/pytorch3d"]
+	path = submodules/pytorch3d
+	url = https://github.com/facebookresearch/pytorch3d
+[submodule "submodules/CLIP"]
+	path = submodules/CLIP
+	url = https://github.com/openai/CLIP

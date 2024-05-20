@@ -1,0 +1,11 @@
+*.pyc
+.vscode
+output
+build
+*.egg-info
+dist
+__pycache__
+data/*
+
+v1-5-pruned.ckpt
+control_v11f1e_sd15_tile.pth
