@@ -1,0 +1,75 @@
+name: "gaussian_object"
+tag: "${rmspace:${system.prompt_processor.prompt},_}"
+use_timestamp: False
+exp_root_dir: "output"
+seed: 0
+ 
+data_type: "loo-datamodule"
+dataset_type: "loo-dataset"
+data:
+  batch_size: 1
+  data_dir: ""
+  eval_camera_distance: 6.
+  resolution: 4
+  prompt: ""
+  sparse_num: 4
+  bg_white: True
+  length: 4000
+  around_gt_steps: 2800
+  refresh_interval: 200
+  use_dust3r: True
+system_type: "gaussian-object-system"
+system:
+  model_name: "control_v11f1e_sd15_tile"
+  exp_name: ""
+  lora_name: "lora-step=1799.ckpt"
+  lora_rank: 64
+  add_diffusion_lora: True
+  add_control_lora: True
+  add_clip_lora: True
+  scene_extent: 5.0
+  around_gt_steps: 2800
+  ctrl_steps: 2800
+  refresh_interval: 200
+  controlnet_num_samples: 1
+  gaussian_opt_params:
+    iterations: 4000
+    position_lr_init: 0.0000016
+    position_lr_final: 0.0000016
+    position_lr_max_steps: 4000
+    min_num_splats: 10000
+    max_num_splats: 3000000
+    densify_grad_threshold: 0.000003
+    prune_opacity_threshold: 0.02
+    densification_interval: 100
+    opacity_reset_interval: 500
+    densify_from_iter: 400
+    densify_until_iter: 3600
+    random_background: True
+    mono_rate: 0.0005
+
+  loss:
+    lambda_l1: 0.5
+    lambda_l2: 0.5
+    lambda_lpips: 2.0
+    lambda_tv: 0.
+
+  optimizer:
+    name: Adam
+    args:
+      lr: 0.001
+      betas: [0.9, 0.99]
+      eps: 1.e-15
+
+trainer:
+  max_steps: 4000
+  log_every_n_steps: 1
+  num_sanity_val_steps: 0
+  limit_val_batches: 0
+  enable_progress_bar: true
+  precision: 32 
+
+checkpoint:
+  save_last: true # save at each validation time
+  save_top_k: -1
+  every_n_train_steps: ${trainer.max_steps}

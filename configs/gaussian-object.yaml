@@ -17,6 +17,7 @@ data:
   length: 4000
   around_gt_steps: 2800
   refresh_interval: 200
+  use_dust3r: False
 system_type: "gaussian-object-system"
 system:
   model_name: "control_v11f1e_sd15_tile"

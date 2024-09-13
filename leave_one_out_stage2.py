@@ -74,7 +74,7 @@ def leave_one_out_training(args, dataset, opt, pipe, testing_iterations, saving_
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
         # Loss
-        loss, Ll1 = cal_loss(opt, args, image, render_pkg, viewpoint_cam, bg)
+        loss, Ll1 = cal_loss(opt, args, image, render_pkg, viewpoint_cam, bg, mono_loss_type=args.mono_loss_type, iteration=iteration)
 
         loss.backward()
 
@@ -200,7 +200,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
             tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
         torch.cuda.empty_cache()
 
-def cal_loss(opt, args, image, render_pkg, viewpoint_cam, bg, silhouette_loss_type="bce", mono_loss_type="mid"):
+def cal_loss(opt, args, image, render_pkg, viewpoint_cam, bg, silhouette_loss_type="bce", mono_loss_type="mid", iteration=0):
     """
     Calculate the loss of the image, contains l1 loss and ssim loss.
     l1 loss: Ll1 = l1_loss(image, gt_image)
@@ -241,6 +241,17 @@ def cal_loss(opt, args, image, render_pkg, viewpoint_cam, bg, silhouette_loss_ty
                 (1 - pearson_corrcoef( -zoe_depth, rendered_depth)),
                 (1 - pearson_corrcoef(1 / (zoe_depth + 200.), rendered_depth))
                 )
+        elif mono_loss_type == "dust3r":
+            gt_mask = torch.where(viewpoint_cam.mask > 0.5, True, False)
+            render_mask = torch.where(render_pkg["rendered_alpha"] > 0.5, True, False)
+            mask = torch.logical_and(gt_mask, render_mask)
+            if mask.sum() < 10:
+                depth_loss = 0.0
+            else:
+                disp_mono = 1 / viewpoint_cam.mono_depth[mask].clamp(1e-6) # shape: [N]
+                disp_render = 1 / render_pkg["rendered_depth"][mask].clamp(1e-6) # shape: [N]
+                depth_loss = torch.abs((disp_render - disp_mono)).mean()
+            depth_loss *= (opt.iterations - iteration) / opt.iterations # linear scheduler
         else:
             raise NotImplementedError
 
@@ -296,15 +307,18 @@ if __name__ == "__main__":
                     else use dense view. In sparse setting, sparse views will be used as training data, \
                     others will be used as testing data.")
     parser.add_argument("--use_mask", default=True, help="Use masked image, by default True")
+    parser.add_argument('--use_dust3r', action='store_true', default=False,
+                        help='use dust3r estimated poses')
+    parser.add_argument('--dust3r_json', type=str, default=None)
     parser.add_argument("--init_pcd_name", default='origin', type=str, help="the init pcd name. 'random' for random, 'origin' for pcd from the whole scene")
     parser.add_argument('--mono_depth_weight', type=float, default=0.0005, help="The rate of monodepth loss")
+    parser.add_argument('--mono_loss_type', type=str, default="mid")
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
     assert args.sparse_view_num > 0, 'leave_one_out is for sparse view training'
     assert os.path.exists(os.path.join(args.source_path, f"sparse_{args.sparse_view_num}.txt")), f"sparse_{args.sparse_view_num}.txt not found!"
-    assert os.path.exists(os.path.join(args.source_path, f"visual_hull_{args.sparse_view_num}.ply")), f"visual_hull_{args.sparse_view_num}.ply not found!"
 
     ids = np.loadtxt(os.path.join(args.source_path, f"sparse_{args.sparse_view_num}.txt"), dtype=np.int32).tolist()
 

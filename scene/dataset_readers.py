@@ -10,6 +10,7 @@
 #
 
 import sys
+import json
 import os.path as osp
 from typing import NamedTuple, Optional
 
@@ -151,6 +152,39 @@ def storePly(path, xyz, rgb):
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
 
+def readDust3rCamerasWithCamInfos(dust3r_frames, ori_cam_infos):
+    cam_infos = []
+    for frame in dust3r_frames:
+        id = frame['id']
+        R = np.array(frame['rotation'])
+        T = np.array(frame['position'])
+        c2w = np.eye(4)
+        c2w[:3, :3] = R
+        c2w[:3, 3] = T
+        w2c = np.linalg.inv(c2w)
+        R = w2c[:3, :3].T
+        T = w2c[:3, 3]
+        focal_length_y = frame['fy']
+        focal_length_x = frame['fx']
+        FovY = focal2fov(focal_length_y, ori_cam_infos[id].height)
+        FovX = focal2fov(focal_length_x, ori_cam_infos[id].width)
+        cam_info = CameraInfo(
+            uid=ori_cam_infos[id].uid,
+            R=R,
+            T=T,
+            FovY=FovY,
+            FovX=FovX,
+            image=ori_cam_infos[id].image,
+            image_path=ori_cam_infos[id].image_path,
+            image_name=ori_cam_infos[id].image_name,
+            width=ori_cam_infos[id].width,
+            height=ori_cam_infos[id].height,
+            mask=ori_cam_infos[id].mask,
+            mono_depth=ori_cam_infos[id].mono_depth
+        )
+        cam_infos.append(cam_info)
+    return cam_infos
+
 def readColmapSceneInfo(path, images, eval, llffhold=8, extra_opts=None):
     try:
         cameras_extrinsic_file = osp.join(path, "sparse/0", "images.bin")
@@ -201,6 +235,25 @@ def readColmapSceneInfo(path, images, eval, llffhold=8, extra_opts=None):
         test_cam_infos = [train_cam_infos[i] for i in ids_test]
         train_cam_infos = [train_cam_infos[i] for i in ids]
         print("Sparse view, only {} images are used for training, others are used for eval.".format(len(ids)))
+    if hasattr(extra_opts, 'use_dust3r') and extra_opts.use_dust3r:
+        print('use dust3r estimated camera poses...')
+        if hasattr(extra_opts, 'dust3r_json') and extra_opts.dust3r_json:
+            with open(extra_opts.dust3r_json) as f:
+                dust3r_frames = json.load(f)
+        else:
+            assert osp.exists(osp.join(path, f"dust3r_{str(extra_opts.sparse_view_num)}.json")), f"dust3r_{str(extra_opts.sparse_view_num)}.json not found!"
+            with open(osp.join(path, f"dust3r_{str(extra_opts.sparse_view_num)}.json")) as f:
+                dust3r_frames = json.load(f)
+        train_cam_infos = readDust3rCamerasWithCamInfos(dust3r_frames, train_cam_infos)
+        if osp.exists(osp.join(path, f"dust3r_{str(extra_opts.sparse_view_num)}_test.json")):
+            with open(osp.join(path, f"dust3r_{str(extra_opts.sparse_view_num)}_test.json")) as f:
+                test_dust3r_frames = json.load(f)
+            test_cam_infos = readDust3rCamerasWithCamInfos(test_dust3r_frames, test_cam_infos)
+        render_cam_infos = generate_ellipse_path_from_camera_infos(train_cam_infos)
+        nerf_normalization = getNerfppNorm(train_cam_infos)
+    # else:
+    #     render_cam_infos = generate_ellipse_path_from_camera_infos(train_cam_infos)
+    #     nerf_normalization = getNerfppNorm(train_cam_infos)
 
     # NOTE in sparse condition, we may use random points to initialize the gaussians
     if hasattr(extra_opts, 'init_pcd_name'):
@@ -237,6 +290,105 @@ def readColmapSceneInfo(path, images, eval, llffhold=8, extra_opts=None):
                            ply_path=ply_path)
     return scene_info
 
+def readDust3rCameras(dust3r_frames, images_folder, depths_npy=None, confidences_npy=None):
+    cam_infos = []
+    depths = np.load(depths_npy) if depths_npy else None
+    confidences = np.load(confidences_npy) if confidences_npy else None
+    for frame in dust3r_frames:
+        id = frame['id']
+        R = np.array(frame['rotation'])
+        T = np.array(frame['position'])
+        c2w = np.eye(4)
+        c2w[:3, :3] = R
+        c2w[:3, 3] = T
+        w2c = np.linalg.inv(c2w)
+        R = w2c[:3, :3].T
+        T = w2c[:3, 3]
+        focal_length_y = frame['fy']
+        focal_length_x = frame['fx']
+        image_height = frame['height']
+        image_width = frame['width']
+        FovY = focal2fov(focal_length_y, image_height)
+        FovX = focal2fov(focal_length_x, image_width)
+
+        image_path = osp.join(images_folder, frame['img_name'])
+        image_name = frame['img_name'].split(".")[0]
+        image = Image.open(image_path)
+
+        mask_path_png = osp.join(osp.dirname(images_folder), "masks", osp.basename(
+            image_path).replace(osp.splitext(osp.basename(image_path))[-1], '.png'))
+        mask = cv2.imread(mask_path_png, cv2.IMREAD_GRAYSCALE).astype(np.uint8)
+        mask = mask.astype(np.float32) / 255.0
+
+        mono_depth = depths[id] if depths is not None else None
+        confidence = confidences[id] / confidences[id].max() if confidences is not None else None
+
+        cam_info = CameraInfo(
+            uid=frame['id'],
+            R=R,
+            T=T,
+            FovY=FovY,
+            FovX=FovX,
+            image=image,
+            image_path=image_path,
+            image_name=image_name,
+            width=image_width,
+            height=image_height,
+            mask=mask,
+            mono_depth=mono_depth,
+            confidence=confidence,
+            is_dust3r=True
+        )
+        cam_infos.append(cam_info)
+    return cam_infos
+
+def readDust3rSceneInfo(path, images, eval, extra_opts=None):
+    images_folder = osp.join(path, "images")
+    if extra_opts.resolution in [1, 2, 4, 8]:
+        tmp_images_folder = images_folder + f'_{str(extra_opts.resolution)}' if extra_opts.resolution != 1 else images_folder
+        if not osp.exists(tmp_images_folder):
+            print(f"The {tmp_images_folder} is not found, use original resolution images")
+        else:
+            print(f"Using resized images in {tmp_images_folder}...")
+            images_folder = tmp_images_folder
+    else:
+        print("use original resolution images")
+
+    ids = np.loadtxt(osp.join(path, f"sparse_{str(extra_opts.sparse_view_num)}.txt"), dtype=np.int32)
+
+    if hasattr(extra_opts, 'dust3r_json') and extra_opts.dust3r_json:
+        with open(extra_opts.dust3r_json) as f:
+            dust3r_frames = json.load(f)
+    else:
+        with open(osp.join(path, f"dust3r_{str(extra_opts.sparse_view_num)}.json")) as f:
+            dust3r_frames = json.load(f)
+    train_cam_infos = readDust3rCameras(
+        dust3r_frames, images_folder,
+        osp.join(path, f"dust3r_depth_{str(extra_opts.sparse_view_num)}.npy"),
+        osp.join(path, f"dust3r_confidence_{str(extra_opts.sparse_view_num)}.npy")
+    )
+    if osp.exists(osp.join(path, f"dust3r_{str(extra_opts.sparse_view_num)}_test.json")):
+        with open(osp.join(path, f"dust3r_{str(extra_opts.sparse_view_num)}_test.json")) as f:
+            test_dust3r_frames = json.load(f)
+        test_cam_infos = readDust3rCameras(test_dust3r_frames, images_folder)
+    else:
+        test_cam_infos = []
+    render_cam_infos = generate_ellipse_path_from_camera_infos(train_cam_infos)
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    ply_path = osp.join(path, extra_opts.init_pcd_name if extra_opts.init_pcd_name.endswith(".ply") 
+                                    else extra_opts.init_pcd_name + ".ply")
+    pcd = fetchPly(ply_path)
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           render_cameras=render_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path)
+    return scene_info
+
 sceneLoadTypeCallbacks = {
-    "Colmap": readColmapSceneInfo
+    "Colmap": readColmapSceneInfo,
+    "DUSt3R": readDust3rSceneInfo,
 }

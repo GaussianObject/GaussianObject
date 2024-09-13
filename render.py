@@ -15,6 +15,7 @@ import subprocess
 from argparse import ArgumentParser
 from os import makedirs
 from pathlib import Path
+from typing import List
 
 import cv2
 import numpy as np
@@ -25,13 +26,15 @@ from PIL import Image
 from tqdm import tqdm
 
 from arguments import ModelParams, PipelineParams, get_combined_args
-from gaussian_renderer import GaussianModel, render
+from gaussian_renderer import GaussianModel, render, render_w_pose
 import lpips
 from scene import Scene
 from utils.general_utils import safe_state
 from utils.image_utils import psnr
 from utils.loss_utils import ssim
 from utils.graphics_utils import focal2fov, fov2focal, getProjectionMatrix
+from scene.cameras import Camera
+from utils.pose_utils import get_loss_tracking, update_pose
 
 
 def readImages(renders_dir, gt_dir):
@@ -106,7 +109,12 @@ def evaluate(model_paths):
         with open(scene_dir + "/per_view.json", 'w') as fp:
             json.dump(per_view_dict[scene_dir], fp, indent=True)
 
-def render_set(model_path, name, iteration, views, gaussians, pipeline, background, save_images=True, not_generate_video=False):
+def render_set(model_path, name, iteration, views: List[Camera], gaussians, pipeline, background, save_images=True, not_generate_video=False, refine_iters=0, extra_opts=None):
+    if extra_opts and extra_opts.use_dust3r:
+        from gaussian_renderer import render_w_pose as render
+    else:
+        from gaussian_renderer import render
+
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
 
@@ -118,9 +126,43 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     lpipss = 0.
     depths = []
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
+        if extra_opts and extra_opts.use_dust3r:
+            opt_params = []
+            opt_params.append(
+                {
+                    "params": [view.cam_rot_delta],
+                    "lr": 0.0003,
+                    "name": "rot_{}".format(view.uid),
+                }
+            )
+            opt_params.append(
+                {
+                    "params": [view.cam_trans_delta],
+                    "lr": 0.0001,
+                    "name": "trans_{}".format(view.uid),
+                }
+            )
+            pose_optimizer = torch.optim.Adam(opt_params)
+            for _ in range(refine_iters):
+                render_pkg = render(view, gaussians, pipeline, background)
+                image, opacity = render_pkg["render"], render_pkg["rendered_alpha"]
+                pose_optimizer.zero_grad()
+                # image_ab = (torch.exp(view.exposure_a)) * image + view.exposure_b
+                # image_ab = image
+                loss_tracking = get_loss_tracking(
+                    image, opacity, view
+                )
+                # print(loss_tracking)
+                loss_tracking.backward()
+                with torch.no_grad():
+                    pose_optimizer.step()
+                    converged = update_pose(view)
+                if converged:
+                    break
+
         render_pkg = render(view, gaussians, pipeline, background)
         rendering = render_pkg["render"]
-        depths.append(render_pkg["rendered_depth"].cpu().numpy()[0])
+        depths.append(render_pkg["rendered_depth"].detach().cpu().numpy()[0])
         gt = view.original_image[0:3, :, :]
         ssims += ssim(rendering, gt).mean().item()
         psnrs += psnr(rendering, gt).mean().item()
@@ -204,22 +246,22 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
         os.remove(depth_path)
 
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, skip_all : bool, extra_opts=None):
-    with torch.no_grad():
-        load_ply = None if extra_opts.load_ply == 'origin' else extra_opts.load_ply
-        gaussians = GaussianModel(dataset.sh_degree)
-        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, extra_opts=extra_opts, load_ply=load_ply)
+    # with torch.no_grad():
+    load_ply = None if extra_opts.load_ply == 'origin' else extra_opts.load_ply
+    gaussians = GaussianModel(dataset.sh_degree)
+    scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, extra_opts=extra_opts, load_ply=load_ply)
 
-        bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
-        background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+    bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
+    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-        if not skip_train:
-            render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, not_generate_video=extra_opts.not_generate_video, save_images=not extra_opts.not_saveimages)
+    if not skip_train:
+        render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, not_generate_video=extra_opts.not_generate_video, save_images=not extra_opts.not_saveimages, refine_iters=0, extra_opts=extra_opts)
 
-        if not skip_test and len(scene.getTestCameras()) > 0:
-            render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, not_generate_video=extra_opts.not_generate_video, save_images=not extra_opts.not_saveimages)
+    if not skip_test and len(scene.getTestCameras()) > 0:
+        render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, not_generate_video=extra_opts.not_generate_video, save_images=not extra_opts.not_saveimages, refine_iters=extra_opts.refine_iters, extra_opts=extra_opts)
 
-        if not skip_all:
-            render_set(dataset.model_path, "all", scene.loaded_iter, scene.getAllCameras(), gaussians, pipeline, background, not_generate_video=extra_opts.not_generate_video, save_images=not extra_opts.not_saveimages)
+    if not skip_all:
+        render_set(dataset.model_path, "all", scene.loaded_iter, scene.getAllCameras(), gaussians, pipeline, background, not_generate_video=extra_opts.not_generate_video, save_images=not extra_opts.not_saveimages, refine_iters=0, extra_opts=extra_opts)
 
 @torch.no_grad()
 def render_path(dataset : ModelParams, iteration : int, pipeline : PipelineParams, extra_opts=None):
@@ -301,6 +343,10 @@ if __name__ == "__main__":
     parser.add_argument("--init_pcd_name", default='origin', type=str, 
                         help="the init pcd name. 'random' for random, 'origin' for pcd from the whole scene")
     parser.add_argument("--use_mask", default=True, help="Use masked image, by default True")
+    parser.add_argument('--use_dust3r', action='store_true', default=False,
+                        help='use dust3r estimated poses')
+    parser.add_argument('--dust3r_json', type=str, default=None)
+    parser.add_argument('--refine_iters', type=int, default=0)
     parser.add_argument("--transform_the_world", action="store_true", help="Transform the world to the origin")
     parser.add_argument("--load_ply", default="origin", type=str, help="Load other ply as init")
     args = get_combined_args(parser)

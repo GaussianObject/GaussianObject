@@ -1,6 +1,7 @@
 import math
 import os
 import random
+import json
 
 import torch
 import numpy as np
@@ -48,6 +49,8 @@ class LooDataModuleConfig:
     around_gt_steps: int = 750
     refresh_interval: int = 100
     refresh_size: int = 20
+    use_dust3r: bool = False
+    json_path: str = ''
 
 
 @register("loo-dataset")
@@ -64,16 +67,9 @@ class LooDataset(Dataset):
         self.refresh_interval = self.cfg.refresh_interval
         self.refresh_size = self.cfg.refresh_size
 
-        cameras_extrinsic_file = os.path.join(self.data_dir, "sparse/0", "images.bin")
-        cameras_intrinsic_file = os.path.join(self.data_dir, "sparse/0", "cameras.bin")
-        cam_extrinsics = read_extrinsics_binary(cameras_extrinsic_file)
-        cam_intrinsics = read_intrinsics_binary(cameras_intrinsic_file)
-        cam_extrinsics_unsorted = list(cam_extrinsics.values())
-        cam_extrinsics = sorted(cam_extrinsics_unsorted.copy(), key = lambda x : x.name)
-
         self.sparse_ids = []
         if self.sparse_num != 0:
-            if self.split == 'train':
+            if self.split == 'train' or cfg.use_dust3r:
                 with open(os.path.join(self.data_dir, f'sparse_{self.sparse_num}.txt')) as f:
                     self.sparse_ids = sorted([int(id) for id in f.readlines()])
             else:
@@ -92,36 +88,29 @@ class LooDataset(Dataset):
             threestudio.info("use original resolution images")
         masks_folder = os.path.join(self.data_dir, 'masks')
 
-        self.Rs, self.Ts, self.heights, self.widths, self.fovxs, self.fovys, self.images, self.masks, self.depths = [], [], [], [], [], [], [], [], []
+        self.Rs, self.Ts, self.heights, self.widths, self.fovxs, self.fovys, self.images, self.masks, self.depths, self.confidences = [], [], [], [], [], [], [], [], [], []
         cam_c = []
-        for idx, extr in enumerate(cam_extrinsics):
-            if idx in self.sparse_ids:
-                intr = cam_intrinsics[extr.camera_id]
-                height = intr.height
-                width = intr.width
 
-                R = np.transpose(qvec2rotmat(extr.qvec))
-                T = np.array(extr.tvec)
+        if cfg.use_dust3r:
+            if len(cfg.json_path):
+                with open(cfg.json_path) as f:
+                    dust3r_frames = json.load(f)
+            else:
+                with open(os.path.join(self.data_dir, f"dust3r_{self.sparse_num}.json")) as f:
+                    dust3r_frames = json.load(f)
+            self.Rs = []
+            self.Ts = []
+            self.fovxs = []
+            self.fovys = []
+            all_Rs = None
+            all_Ts = None
+            cam_c = []
+            dust3r_depths = np.load(os.path.join(self.data_dir, f"dust3r_depth_{self.sparse_num}.npy"))
+            dust3r_confidences = np.load(os.path.join(self.data_dir, f"dust3r_confidence_{self.sparse_num}.npy"))
+            for frame in dust3r_frames:
+                id = frame['id']
 
-                if intr.model=="SIMPLE_PINHOLE":
-                    focal_length_x = intr.params[0]
-                    FovY = focal2fov(focal_length_x, height)
-                    FovX = focal2fov(focal_length_x, width)
-                elif intr.model=="PINHOLE":
-                    focal_length_x = intr.params[0]
-                    focal_length_y = intr.params[1]
-                    FovY = focal2fov(focal_length_y, height)
-                    FovX = focal2fov(focal_length_x, width)
-                else:
-                    assert False, "Colmap camera model not handled: only undistorted datasets (PINHOLE or SIMPLE_PINHOLE cameras) supported!"
-
-                cam_c.append(np.linalg.inv(getWorld2View2(R, T))[:3, 3:4])
-                self.Rs.append(R)
-                self.Ts.append(T)
-                self.fovxs.append(FovX)
-                self.fovys.append(FovY)
-
-                image_path = os.path.join(images_folder, os.path.basename(extr.name))
+                image_path = os.path.join(images_folder, frame['img_name'])
                 image_name = os.path.basename(image_path).split(".")[0]
                 image = Image.open(image_path)
 
@@ -131,12 +120,20 @@ class LooDataset(Dataset):
                 resized_mask = resize_mask_image(mask, image.size)
                 loaded_mask = torch.from_numpy(resized_mask).unsqueeze(0)
 
-                depth_path = os.path.join(os.path.dirname(images_folder), "zoe_depth", os.path.basename(
-                    image_path).replace(os.path.splitext(os.path.basename(image_path))[-1], '.png'))
-                depth = load_raw_depth(depth_path)
+                if split == 'train':
+                    depth = dust3r_depths[id]
+                    confidence = dust3r_confidences[id] / dust3r_confidences[id].max()
+                else:
+                    depth_path = os.path.join(os.path.dirname(images_folder), "zoe_depth", os.path.basename(
+                        image_path).replace(os.path.splitext(os.path.basename(image_path))[-1], '.png'))
+                    depth = np.ones_like(resized_mask)
+                    confidence = np.ones_like(resized_mask)
                 resized_depth = cv2.resize(depth, image.size, interpolation=cv2.INTER_NEAREST)
                 loaded_depth = torch.from_numpy(resized_depth).unsqueeze(0)
                 loaded_depth[loaded_mask <= 0.5] = 0.
+                resized_confidence = cv2.resize(confidence, image.size, interpolation=cv2.INTER_NEAREST)
+                loaded_confidence = torch.from_numpy(resized_confidence).unsqueeze(0)
+                loaded_confidence[loaded_mask <= 0.5] = 0.
 
                 # mask image
                 image = (torch.from_numpy(np.array(image))/255.).permute(2, 0, 1) # C, H, W
@@ -145,20 +142,104 @@ class LooDataset(Dataset):
                 self.images.append(image)
                 self.masks.append(loaded_mask.squeeze())
                 self.depths.append(loaded_depth.squeeze())
+                self.confidences.append(loaded_confidence.squeeze())
 
                 self.heights.append(image.shape[-2])
                 self.widths.append(image.shape[-1])
 
-        all_Rs = []
-        all_Ts = []
-        cam_c = []
-        for extr in cam_extrinsics:
-            R = np.transpose(qvec2rotmat(extr.qvec))
-            T = np.array(extr.tvec)
+                R = np.array(frame['rotation'])
+                T = np.array(frame['position'])
+                c2w = np.eye(4)
+                c2w[:3, :3] = R
+                c2w[:3, 3] = T
+                w2c = np.linalg.inv(c2w)
+                R = w2c[:3, :3].T
+                T = w2c[:3, 3]
+                focal_length_y = frame['fy']
+                focal_length_x = frame['fx']
+                height = frame['height']
+                width = frame['width']
+                FovY = focal2fov(focal_length_y / self.resolution, self.heights[id])
+                FovX = focal2fov(focal_length_x / self.resolution, self.widths[id])
+                cam_c.append(np.linalg.inv(getWorld2View2(R, T))[:3, 3:4])
+                self.Rs.append(R)
+                self.Ts.append(T)
+                self.fovxs.append(FovX)
+                self.fovys.append(FovY)
 
-            cam_c.append(np.linalg.inv(getWorld2View2(R, T))[:3, 3:4])
-            all_Rs.append(R)
-            all_Ts.append(T)
+        else:
+            cameras_extrinsic_file = os.path.join(self.data_dir, "sparse/0", "images.bin")
+            cameras_intrinsic_file = os.path.join(self.data_dir, "sparse/0", "cameras.bin")
+            cam_extrinsics = read_extrinsics_binary(cameras_extrinsic_file)
+            cam_intrinsics = read_intrinsics_binary(cameras_intrinsic_file)
+            cam_extrinsics_unsorted = list(cam_extrinsics.values())
+            cam_extrinsics = sorted(cam_extrinsics_unsorted.copy(), key = lambda x : x.name)
+
+            for idx, extr in enumerate(cam_extrinsics):
+                if idx in self.sparse_ids:
+                    intr = cam_intrinsics[extr.camera_id]
+                    height = intr.height
+                    width = intr.width
+
+                    R = np.transpose(qvec2rotmat(extr.qvec))
+                    T = np.array(extr.tvec)
+
+                    if intr.model=="SIMPLE_PINHOLE":
+                        focal_length_x = intr.params[0]
+                        FovY = focal2fov(focal_length_x, height)
+                        FovX = focal2fov(focal_length_x, width)
+                    elif intr.model=="PINHOLE":
+                        focal_length_x = intr.params[0]
+                        focal_length_y = intr.params[1]
+                        FovY = focal2fov(focal_length_y, height)
+                        FovX = focal2fov(focal_length_x, width)
+                    else:
+                        assert False, "Colmap camera model not handled: only undistorted datasets (PINHOLE or SIMPLE_PINHOLE cameras) supported!"
+
+                    cam_c.append(np.linalg.inv(getWorld2View2(R, T))[:3, 3:4])
+                    self.Rs.append(R)
+                    self.Ts.append(T)
+                    self.fovxs.append(FovX)
+                    self.fovys.append(FovY)
+
+                    image_path = os.path.join(images_folder, os.path.basename(extr.name))
+                    image_name = os.path.basename(image_path).split(".")[0]
+                    image = Image.open(image_path)
+
+                    mask_path = os.path.join(masks_folder, image_name + '.png')
+                    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE).astype(np.uint8)
+                    mask = mask.astype(np.float32) / 255.0
+                    resized_mask = resize_mask_image(mask, image.size)
+                    loaded_mask = torch.from_numpy(resized_mask).unsqueeze(0)
+
+                    depth_path = os.path.join(os.path.dirname(images_folder), "zoe_depth", os.path.basename(
+                        image_path).replace(os.path.splitext(os.path.basename(image_path))[-1], '.png'))
+                    depth = load_raw_depth(depth_path)
+                    resized_depth = cv2.resize(depth, image.size, interpolation=cv2.INTER_NEAREST)
+                    loaded_depth = torch.from_numpy(resized_depth).unsqueeze(0)
+                    loaded_depth[loaded_mask <= 0.5] = 0.
+
+                    # mask image
+                    image = (torch.from_numpy(np.array(image))/255.).permute(2, 0, 1) # C, H, W
+                    image[(loaded_mask <= 0.5).expand_as(image)] = 1.0 if self.cfg.bg_white else 0.0
+
+                    self.images.append(image)
+                    self.masks.append(loaded_mask.squeeze())
+                    self.depths.append(loaded_depth.squeeze())
+
+                    self.heights.append(image.shape[-2])
+                    self.widths.append(image.shape[-1])
+
+            all_Rs = []
+            all_Ts = []
+            cam_c = []
+            for extr in cam_extrinsics:
+                R = np.transpose(qvec2rotmat(extr.qvec))
+                T = np.array(extr.tvec)
+
+                cam_c.append(np.linalg.inv(getWorld2View2(R, T))[:3, 3:4])
+                all_Rs.append(R)
+                all_Ts.append(T)
 
         self.cameras_extent = getNerfppNorm(cam_c)
         self.camera_sampler = RandomCameraSampler(self.Rs, self.Ts, all_Rs, all_Ts)

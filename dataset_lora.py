@@ -1,6 +1,5 @@
 import os
 import cv2
-import math
 import json
 import pickle
 import torch
@@ -128,7 +127,8 @@ class GSCacheDataset(Dataset):
         sh_degree: int = 0,
         use_prompt_list: bool = False,
         cache_max_iter: int = 240,
-        train: bool = True
+        train: bool = True,
+        use_dust3r: bool = False
     ):
         super().__init__()
         self.gaussian_dir = gaussian_dir
@@ -147,6 +147,7 @@ class GSCacheDataset(Dataset):
         self.manual_noise_reduce_gamma = manual_noise_reduce_gamma
         self.prompt = prompt
         self.train = train
+        self.use_dust3r = use_dust3r
         self.bg_white = bg_white
         self.bg_color = torch.tensor([1., 1., 1.] if bg_white else [0., 0., 0.] , dtype=torch.float32, device='cuda')
         self.use_prompt_list = use_prompt_list
@@ -160,13 +161,6 @@ class GSCacheDataset(Dataset):
         self.gaussian.load_ply(ply_path, False)
         self.parser = ArgumentParser(description="Training script parameters")
         self.pipe = PipelineParams(self.parser)
-
-        cameras_extrinsic_file = os.path.join(self.data_dir, "sparse/0", "images.bin")
-        cameras_intrinsic_file = os.path.join(self.data_dir, "sparse/0", "cameras.bin")
-        cam_extrinsics = read_extrinsics_binary(cameras_extrinsic_file)
-        cam_intrinsics = read_intrinsics_binary(cameras_intrinsic_file)
-        cam_extrinsics_unsorted = list(cam_extrinsics.values())
-        cam_extrinsics = sorted(cam_extrinsics_unsorted.copy(), key = lambda x : x.name)
 
         sparse_ids = []
         with open(os.path.join(self.data_dir, f'sparse_{self.sparse_num}.txt')) as f:
@@ -194,28 +188,12 @@ class GSCacheDataset(Dataset):
         self.noisys: List[List[np.ndarray]] = []
         self.statistics_info = []
 
-        for idx, extr in enumerate(cam_extrinsics):
-            if (self.train and idx in sparse_ids) or (not self.train and idx not in sparse_ids):
-                intr = cam_intrinsics[extr.camera_id]
-                height = intr.height
-                width = intr.width
-
-                R = np.transpose(qvec2rotmat(extr.qvec))
-                T = np.array(extr.tvec)
-
-                if intr.model=="SIMPLE_PINHOLE":
-                    focal_length_x = intr.params[0]
-                    FovY = focal2fov(focal_length_x, height)
-                    FovX = focal2fov(focal_length_x, width)
-                elif intr.model=="PINHOLE":
-                    focal_length_x = intr.params[0]
-                    focal_length_y = intr.params[1]
-                    FovY = focal2fov(focal_length_y, height)
-                    FovX = focal2fov(focal_length_x, width)
-                else:
-                    assert False, "Colmap camera model not handled: only undistorted datasets (PINHOLE or SIMPLE_PINHOLE cameras) supported!"
-                
-                image_path = os.path.join(images_folder, os.path.basename(extr.name))
+        if self.use_dust3r:
+            # with open(os.path.join(self.data_dir, f"dust3r_{self.sparse_num}.json")) as f:
+            with open(os.path.join(self.gaussian_dir, 'refined_cams.json')) as f:
+                dust3r_frames = json.load(f)
+            for idx, frame in zip(sparse_ids, dust3r_frames):
+                image_path = os.path.join(images_folder, frame['img_name'])
                 image_name = os.path.basename(image_path).split(".")[0]
                 image = Image.open(image_path)
                 image = np.array(image)
@@ -226,6 +204,21 @@ class GSCacheDataset(Dataset):
                 mask = np.array(mask)
                 image[mask < 127] = 255 if bg_white else 0
 
+                R = np.array(frame['rotation'])
+                T = np.array(frame['position'])
+                c2w = np.eye(4)
+                c2w[:3, :3] = R
+                c2w[:3, 3] = T
+                w2c = np.linalg.inv(c2w)
+                R = w2c[:3, :3].T
+                T = w2c[:3, 3]
+                height = frame['height']
+                width = frame['width']
+                focal_length_y = frame['fy']
+                focal_length_x = frame['fx']
+                FovY = focal2fov(focal_length_y, height)
+                FovX = focal2fov(focal_length_x, width)
+
                 self.Rs.append(R)
                 self.Ts.append(T)
                 self.heights.append(height)
@@ -234,15 +227,72 @@ class GSCacheDataset(Dataset):
                 self.fovys.append(FovY)
                 self.images.append(image)
 
-                if self.train:
-                    noisy_paths = os.listdir(os.path.join(self.loo_dir, f'leave_{idx}', 'left_image'))
-                    its = sorted([int(path.replace('sample_', '').replace('.png', '')) for path in noisy_paths])
-                    min_it = its[0]
-                    noisys = [np.array(Image.open(os.path.join(self.loo_dir, f'leave_{idx}', 'left_image', f'sample_{it}.png'))) for it in its if it < min_it + self.cache_max_iter]
-                    self.noisys.append(noisys)
-                    print(f'Load {len(noisys)} images for leave {idx}')
-                    if os.path.exists(os.path.join(self.loo_dir, f'leave_{idx}', "diffs.pkl")):
-                        self.statistics_info.append(load_statistics_info(os.path.join(self.loo_dir, f'leave_{idx}', "diffs.pkl")))
+                noisy_paths = os.listdir(os.path.join(self.loo_dir, f'leave_{idx}', 'left_image'))
+                its = sorted([int(path.replace('sample_', '').replace('.png', '')) for path in noisy_paths])
+                min_it = its[0]
+                noisys = [np.array(Image.open(os.path.join(self.loo_dir, f'leave_{idx}', 'left_image', f'sample_{it}.png'))) for it in its if it < min_it + self.cache_max_iter]
+                self.noisys.append(noisys)
+                print(f'Load {len(noisys)} images for leave {idx}')
+                if os.path.exists(os.path.join(self.loo_dir, f'leave_{idx}', "diffs.pkl")):
+                    self.statistics_info.append(load_statistics_info(os.path.join(self.loo_dir, f'leave_{idx}', "diffs.pkl")))
+
+        else:
+            cameras_extrinsic_file = os.path.join(self.data_dir, "sparse/0", "images.bin")
+            cameras_intrinsic_file = os.path.join(self.data_dir, "sparse/0", "cameras.bin")
+            cam_extrinsics = read_extrinsics_binary(cameras_extrinsic_file)
+            cam_intrinsics = read_intrinsics_binary(cameras_intrinsic_file)
+            cam_extrinsics_unsorted = list(cam_extrinsics.values())
+            cam_extrinsics = sorted(cam_extrinsics_unsorted.copy(), key = lambda x : x.name)
+
+            for idx, extr in enumerate(cam_extrinsics):
+                if (self.train and idx in sparse_ids) or (not self.train and idx not in sparse_ids):
+                    intr = cam_intrinsics[extr.camera_id]
+                    height = intr.height
+                    width = intr.width
+
+                    R = np.transpose(qvec2rotmat(extr.qvec))
+                    T = np.array(extr.tvec)
+
+                    if intr.model=="SIMPLE_PINHOLE":
+                        focal_length_x = intr.params[0]
+                        FovY = focal2fov(focal_length_x, height)
+                        FovX = focal2fov(focal_length_x, width)
+                    elif intr.model=="PINHOLE":
+                        focal_length_x = intr.params[0]
+                        focal_length_y = intr.params[1]
+                        FovY = focal2fov(focal_length_y, height)
+                        FovX = focal2fov(focal_length_x, width)
+                    else:
+                        assert False, "Colmap camera model not handled: only undistorted datasets (PINHOLE or SIMPLE_PINHOLE cameras) supported!"
+                    
+                    image_path = os.path.join(images_folder, os.path.basename(extr.name))
+                    image_name = os.path.basename(image_path).split(".")[0]
+                    image = Image.open(image_path)
+                    image = np.array(image)
+
+                    mask_path = os.path.join(masks_folder, image_name + '.png')
+                    mask = Image.open(mask_path)
+                    mask = mask.resize((image.shape[1], image.shape[0]))
+                    mask = np.array(mask)
+                    image[mask < 127] = 255 if bg_white else 0
+
+                    self.Rs.append(R)
+                    self.Ts.append(T)
+                    self.heights.append(height)
+                    self.widths.append(width)
+                    self.fovxs.append(FovX)
+                    self.fovys.append(FovY)
+                    self.images.append(image)
+
+                    if self.train:
+                        noisy_paths = os.listdir(os.path.join(self.loo_dir, f'leave_{idx}', 'left_image'))
+                        its = sorted([int(path.replace('sample_', '').replace('.png', '')) for path in noisy_paths])
+                        min_it = its[0]
+                        noisys = [np.array(Image.open(os.path.join(self.loo_dir, f'leave_{idx}', 'left_image', f'sample_{it}.png'))) for it in its if it < min_it + self.cache_max_iter]
+                        self.noisys.append(noisys)
+                        print(f'Load {len(noisys)} images for leave {idx}')
+                        if os.path.exists(os.path.join(self.loo_dir, f'leave_{idx}', "diffs.pkl")):
+                            self.statistics_info.append(load_statistics_info(os.path.join(self.loo_dir, f'leave_{idx}', "diffs.pkl")))
 
     def __len__(self):
         return len(self.images)

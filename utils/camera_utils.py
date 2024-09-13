@@ -9,7 +9,8 @@
 #
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 import os
-from scene.cameras import Camera
+import math
+from scene.cameras import Camera, Camera_w_pose
 import numpy as np
 from utils.general_utils import PILtoTorch
 from utils.graphics_utils import fov2focal
@@ -36,11 +37,13 @@ class CameraInfo(NamedTuple):
     height: int
     mask: Optional[np.ndarray] = None
     mono_depth: Optional[np.ndarray] = None
+    confidence: Optional[np.ndarray] = None
+    is_dust3r: bool = False
 
 
 def loadCam(args, 
             id, 
-            cam_info, 
+            cam_info: CameraInfo, 
             resolution_scale, mode):
     orig_w, orig_h = cam_info.width, cam_info.height
 
@@ -79,18 +82,35 @@ def loadCam(args,
 
     ### we load depth here for acceleration
     mono_depth = None
-    if mode == 'train':
+    if cam_info.mono_depth is not None:
+        loaded_depth = cam_info.mono_depth
+        resized_depth = cv2.resize(loaded_depth, resolution, interpolation=cv2.INTER_NEAREST)
+        mono_depth = torch.from_numpy(resized_depth).unsqueeze(0)
+    elif mode == 'train':
         mono_depth_path_png = os.path.join(os.path.dirname(os.path.dirname(cam_info.image_path)), "zoe_depth",cam_info.image_name+'.png')
         if os.path.exists(mono_depth_path_png):
             loaded_depth = load_raw_depth(mono_depth_path_png)
             resized_depth = cv2.resize(loaded_depth, resolution, interpolation=cv2.INTER_NEAREST)
             mono_depth = torch.from_numpy(resized_depth).unsqueeze(0)
 
-    return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
-                  FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
-                  image=gt_image, gt_alpha_mask=loaded_mask, mono_depth=mono_depth,
-                  image_name=cam_info.image_name, uid=id, 
-                  data_device=args.data_device, white_background=args.white_background)
+    confidence = None
+    if cam_info.confidence is not None:
+        loaded_confidence = cam_info.confidence
+        resized_confidence = cv2.resize(loaded_confidence, resolution, interpolation=cv2.INTER_NEAREST)
+        confidence = torch.from_numpy(resized_confidence).unsqueeze(0)
+
+    if cam_info.is_dust3r:
+        return Camera_w_pose(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
+                      FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
+                      image=gt_image, gt_alpha_mask=loaded_mask, mono_depth=mono_depth,
+                      image_name=cam_info.image_name, uid=id, 
+                      data_device=args.data_device, white_background=args.white_background)
+    else:
+        return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
+                      FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
+                      image=gt_image, gt_alpha_mask=loaded_mask, mono_depth=mono_depth,
+                      image_name=cam_info.image_name, uid=id, 
+                      data_device=args.data_device, white_background=args.white_background)
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args, mode="test"):
     camera_list = []

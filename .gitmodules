@@ -13,3 +13,12 @@
 [submodule "submodules/CLIP"]
 	path = submodules/CLIP
 	url = https://github.com/openai/CLIP
+[submodule "submodules/diff-gaussian-rasterization-w-pose"]
+	path = submodules/diff-gaussian-rasterization-w-pose
+	url = https://github.com/rmurai0610/diff-gaussian-rasterization-w-pose
+[submodule "submodules/segment-anything"]
+	path = submodules/segment-anything
+	url = https://github.com/facebookresearch/segment-anything
+[submodule "submodules/croco"]
+	path = submodules/croco
+	url = https://github.com/naver/croco

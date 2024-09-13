@@ -12,24 +12,33 @@
 import os
 import sys
 import uuid
+import json
 from argparse import ArgumentParser, Namespace
 from random import randint
 from typing import Optional
 
 import torch
+import numpy as np
 import torch.nn.functional as F
 from tqdm import tqdm
 from torchmetrics.functional.regression import pearson_corrcoef
 from arguments import ModelParams, OptimizationParams, PipelineParams
-from gaussian_renderer import network_gui, render
+from gaussian_renderer import network_gui
 from scene import GaussianModel, Scene
 from utils.general_utils import safe_state
 from utils.image_utils import psnr
 from utils.loss_utils import l1_loss, ssim, monodisp
+from utils.pose_utils import update_pose, get_loss_tracking
 from torch.utils.tensorboard.writer import SummaryWriter
 TENSORBOARD_FOUND = True
 
 def training(args, dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+    if args.use_dust3r:
+        print('Use pose refinement from dust3r')
+        from gaussian_renderer import render_w_pose as render
+    else:
+        from gaussian_renderer import render
+
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
@@ -77,6 +86,21 @@ def training(args, dataset, opt, pipe, testing_iterations, saving_iterations, ch
             viewpoint_stack = scene.getTrainCameras().copy()
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
 
+        if args.use_dust3r:
+            pose_opt_params = [
+                {
+                    "params": [viewpoint_cam.cam_rot_delta],
+                    "lr": 0.003,
+                    "name": "rot_{}".format(viewpoint_cam.uid),
+                },
+                {
+                    "params": [viewpoint_cam.cam_trans_delta],
+                    "lr": 0.001,
+                    "name": "trans_{}".format(viewpoint_cam.uid),
+                }
+            ]
+            pose_optimizer = torch.optim.Adam(pose_opt_params)
+
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
@@ -88,7 +112,7 @@ def training(args, dataset, opt, pipe, testing_iterations, saving_iterations, ch
             render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
         # Loss
-        loss, Ll1 = cal_loss(opt, args, image, render_pkg, viewpoint_cam, bg, tb_writer=tb_writer, iteration=iteration)
+        loss, Ll1 = cal_loss(opt, args, image, render_pkg, viewpoint_cam, bg, tb_writer=tb_writer, iteration=iteration, mono_loss_type=args.mono_loss_type)
 
         loss.backward()
         iter_end.record()  # type: ignore
@@ -129,12 +153,32 @@ def training(args, dataset, opt, pipe, testing_iterations, saving_iterations, ch
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
+                if args.use_dust3r and iteration < opt.pose_iterations:
+                    pose_optimizer.step()
+                    pose_optimizer.zero_grad(set_to_none = True)
+                    _ = update_pose(viewpoint_cam)
 
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/ckpt" + str(iteration) + ".pth")
 
-def prepare_output_and_logger(args):    
+    if args.use_dust3r:
+        with open(os.path.join(dataset.source_path, f'dust3r_{args.sparse_view_num}.json'), 'r') as f:
+            json_cameras = json.load(f)
+        refined_cameras = []
+        for viewpoint_cam, json_camera in zip(scene.getTrainCameras(), json_cameras):
+            camera = json_camera
+            w2c = np.eye(4)
+            w2c[:3, :3] = viewpoint_cam.R.T
+            w2c[:3, 3] = viewpoint_cam.T
+            c2w = np.linalg.inv(w2c)
+            camera['position'] = c2w[:3, 3].tolist()
+            camera['rotation'] = c2w[:3, :3].tolist()
+            refined_cameras.append(camera)
+        with open(os.path.join(scene.model_path, 'refined_cams.json'), 'w') as f:
+            json.dump(refined_cameras, f, indent=4)
+
+def prepare_output_and_logger(args):
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):
             unique_str=os.getenv('OAR_JOB_ID')
@@ -238,12 +282,30 @@ def cal_loss(opt, args, image, render_pkg, viewpoint_cam, bg, silhouette_loss_ty
             disp_mono = 1 / viewpoint_cam.mono_depth[viewpoint_cam.mask > 0.5].clamp(1e-6) # shape: [N]
             disp_render = 1 / render_pkg["rendered_depth"][viewpoint_cam.mask > 0.5].clamp(1e-6) # shape: [N]
             depth_loss = (1 - pearson_corrcoef(disp_render, -disp_mono)).mean()
+        elif mono_loss_type == "dust3r":
+            gt_mask = torch.where(viewpoint_cam.mask > 0.5, True, False)
+            render_mask = torch.where(render_pkg["rendered_alpha"] > 0.5, True, False)
+            mask = torch.logical_and(gt_mask, render_mask)
+            if mask.sum() < 10:
+                depth_loss = 0.0
+            else:
+                disp_mono = 1 / viewpoint_cam.mono_depth[mask].clamp(1e-6) # shape: [N]
+                disp_render = 1 / render_pkg["rendered_depth"][mask].clamp(1e-6) # shape: [N]
+                depth_loss = torch.abs((disp_render - disp_mono)).mean()
+            depth_loss *= (opt.iterations - iteration) / opt.iterations # linear scheduler
         else:
             raise NotImplementedError
 
         loss = loss + args.mono_depth_weight * depth_loss
         if tb_writer is not None:
             tb_writer.add_scalar('loss/depth_loss', depth_loss, iteration)
+
+    if args.use_dust3r:
+        image_ab = (torch.exp(viewpoint_cam.exposure_a)) * image + viewpoint_cam.exposure_b
+        tracking_loss = get_loss_tracking(image_ab, render_pkg["rendered_alpha"], viewpoint_cam) + args.lambda_t_norm * torch.abs(viewpoint_cam.cam_trans_delta).mean()
+        loss = loss + tracking_loss
+        if tb_writer is not None:
+            tb_writer.add_scalar('loss/tracking_loss', tracking_loss, iteration)
 
     return loss, Ll1
 
@@ -268,10 +330,15 @@ if __name__ == "__main__":
                         else use dense view. In sparse setting, sparse views will be used as training data, \
                         others will be used as testing data.")
     parser.add_argument("--use_mask", default=True, help="Use masked image, by default True")
+    parser.add_argument('--use_dust3r', action='store_true', default=False,
+                        help='use dust3r estimated poses')
+    parser.add_argument('--dust3r_json', type=str, default=None)
     parser.add_argument("--init_pcd_name", default='origin', type=str, 
                         help="the init pcd name. 'random' for random, 'origin' for pcd from the whole scene")
     parser.add_argument("--transform_the_world", action="store_true", help="Transform the world to the origin")
     parser.add_argument('--mono_depth_weight', type=float, default=0.0005, help="The rate of monodepth loss")
+    parser.add_argument('--lambda_t_norm', type=float, default=0.0005)
+    parser.add_argument('--mono_loss_type', type=str, default="mid")
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)

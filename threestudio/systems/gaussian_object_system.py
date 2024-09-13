@@ -284,6 +284,17 @@ class GaussianDreamer(BaseLift3DSystem):
                     (1 - pearson_corrcoef( -zoe_depth, rendered_depth)),
                     (1 - pearson_corrcoef(1 / (zoe_depth + 200.), rendered_depth))
                 ))
+            elif mono_loss_type == "dust3r":
+                gt_mask = torch.where(viewpoint_cam.mask > 0.5, True, False)
+                render_mask = torch.where(render_pkg["rendered_alpha"] > 0.5, True, False)
+                mask = torch.logical_and(gt_mask, render_mask)
+                if mask.sum() < 10:
+                    depth_loss = 0.0
+                else:
+                    disp_mono = 1 / viewpoint_cam.mono_depth[mask].clamp(1e-6) # shape: [N]
+                    disp_render = 1 / render_pkg["rendered_depth"][mask].clamp(1e-6) # shape: [N]
+                    depth_loss = torch.abs((disp_render - disp_mono)).mean()
+                depth_loss *= (self.opt.iterations - self.global_step) / self.opt.iterations # linear scheduler
             else:
                 raise NotImplementedError
 

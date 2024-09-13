@@ -12,6 +12,7 @@
 import torch
 import torch.nn.functional as F
 from torch.autograd import Variable
+from typing import Optional
 from math import exp
 
 def l1_loss(network_output, gt):
@@ -65,7 +66,7 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
     else:
         return ssim_map.mean(1).mean(1).mean(1)
 
-def monodisp(gt_depth: torch.Tensor, dyn_depth: torch.Tensor, loss_type: str = "l1"):
+def monodisp(gt_depth: torch.Tensor, dyn_depth: torch.Tensor, loss_type: str = "l1", weight_map: Optional[torch.Tensor] = None):
     t_d = torch.median(dyn_depth, dim=-1, keepdim=True).values
     s_d = torch.mean(torch.abs(dyn_depth - t_d), dim=-1, keepdim=True)
     dyn_depth_norm = (dyn_depth - t_d) / s_d
@@ -74,7 +75,11 @@ def monodisp(gt_depth: torch.Tensor, dyn_depth: torch.Tensor, loss_type: str = "
     s_gt = torch.mean(torch.abs(gt_depth - t_gt), dim=-1, keepdim=True)
     gt_depth_norm = (gt_depth - t_gt) / s_gt
 
-    disp_loss = torch.abs((dyn_depth_norm - gt_depth_norm)).mean() if loss_type == "l1" else ((dyn_depth_norm - gt_depth_norm) ** 2).mean()
+    disp_diff = torch.abs((dyn_depth_norm - gt_depth_norm))
+
+    disp_diff = disp_diff * weight_map if weight_map is not None else disp_diff
+    disp_loss = disp_diff.mean() if loss_type == "l1" else (disp_diff ** 2).mean()
+
     return dyn_depth_norm, gt_depth_norm, disp_loss
 
 def percentile(t, q):

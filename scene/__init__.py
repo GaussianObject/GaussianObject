@@ -43,16 +43,13 @@ class Scene:
         self.test_cameras = {}
         self.render_cameras = {}
 
-        if os.path.exists(os.path.join(args.source_path, "sparse")): # type: ignore
+        if hasattr(extra_opts, 'use_dust3r') and extra_opts.use_dust3r: # type: ignore
+            scene_info = sceneLoadTypeCallbacks["DUSt3R"](args.source_path, args.images, args.eval, extra_opts=extra_opts) # type: ignore
+        elif os.path.exists(os.path.join(args.source_path, "sparse")): # type: ignore
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval, extra_opts=extra_opts) # type: ignore
         elif os.path.exists(os.path.join(args.source_path, "transforms_alignz_train.json")): # type: ignore
             print("Found transforms_alignz_train.json file, assuming OpenIllumination data set!")
             scene_info = sceneLoadTypeCallbacks["OpenIllumination"](args.source_path, args.white_background, args.eval, extra_opts=extra_opts) # type: ignore
-        elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")): # type: ignore
-            print("Found transforms_train.json file, assuming Blender data set!")
-            scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval, extra_opts=extra_opts) # type: ignore
-        elif os.path.exists(os.path.join(args.source_path, "hydrant", "frame_annotations.jgz")): # type: ignore
-            scene_info = sceneLoadTypeCallbacks["CO3D"](args.source_path, extra_opts=extra_opts) # type: ignore
         else:
             assert False, "Could not recognize scene type!"
 

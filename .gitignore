@@ -6,6 +6,7 @@ build
 dist
 __pycache__
 data/*
+.cache
 
 v1-5-pruned.ckpt
-control_v11f1e_sd15_tile.pth
+*.pth

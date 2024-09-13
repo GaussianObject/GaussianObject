@@ -93,6 +93,7 @@ class OptimizationParams(ParamGroup):
         self.end_sample_pseudo = 1000000 # not use
         self.sample_pseudo_interval = 10 # not use
         self.random_background = False
+        self.pose_iterations = 4000
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):

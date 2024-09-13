@@ -44,6 +44,7 @@ if __name__ == '__main__':
     parser.add_argument('--add_diffusion_lora', action='store_true', default=False)
     parser.add_argument('--add_control_lora', action='store_true', default=False)
     parser.add_argument('--add_clip_lora', action='store_true', default=False)
+    parser.add_argument('--use_dust3r', action='store_true', default=False)
 
     args = parser.parse_args()
 
@@ -91,7 +92,8 @@ if __name__ == '__main__':
         resolution=args.resolution,
         sparse_num=args.sparse_num,
         use_prompt_list=args.use_prompt_list,
-        cache_max_iter=args.cache_max_iter
+        cache_max_iter=args.cache_max_iter,
+        use_dust3r=args.use_dust3r,
     )
     dataloader = DataLoader(dataset, num_workers=0, batch_size=args.batch_size, shuffle=True)
     loggers = [
