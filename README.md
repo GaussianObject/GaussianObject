@@ -14,6 +14,8 @@ Chen Yang*, Sikuang Li*, Jiemin Fang†, Ruofan Liang, Lingxi Xie, Xiaopeng Zhan
 
 ---
 
+https://github.com/user-attachments/assets/c144b4f8-d21c-4fae-a785-39a21c0fb66a
+
 We propose GaussianObject, a framework to represent and render the 3D object with Gaussian splatting, that achieves high rendering quality with only **4 input images** even under **COLMAP-free** conditions.
 
 We first introduce techniques of visual hull and floater elimination which explicitly inject structure priors into the initial optimization process for helping build multi-view consistency, yielding a coarse 3D Gaussian representation. Then we construct a Gaussian repair model based on diffusion models to supplement the omitted object information, where Gaussians are further refined. We design a self-generating strategy to obtain image pairs for training the repair model. Our GaussianObject achives strong reconstruction results from only 4 views and significantly outperforms previous state-of-the-art methods.
