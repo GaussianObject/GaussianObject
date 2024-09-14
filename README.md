@@ -4,9 +4,14 @@
 
 # GaussianObject: High-Quality 3D Object Reconstruction from Four Views with Gaussian Splatting
 
-Chen Yang*, Sikuang Li*, Jiemin Fang†, Ruofan Liang, Lingxi Xie, Xiaopeng Zhang, Wei Shen✉, Qi Tian
+## SIGGRAPH Asia 2024 (ACM Transactions on Graphics)
 
 ### [Project Page](https://gaussianobject.github.io/) | [Paper](https://arxiv.org/abs/2402.10259) | [Video](https://www.youtube.com/watch?v=s5arAXdgdZQ) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1WIZgM--tJ3aq25t9g238JAuAoXrQYVMs?usp=sharing#scrollTo=TlrxF62GNePB)
+
+[GaussianObject: High-Quality 3D Object Reconstruction from Four Views with Gaussian Splatting](https://gaussianobject.github.io/)    
+[Chen Yang](https://scholar.google.com/citations?hl=zh-CN&user=StdXTR8AAAAJ)<sup>1*</sup>, [Sikuang Li](https://gaussianobject.github.io/)<sup>1*</sup>, [Jiemin Fang](https://jaminfong.cn/)<sup>2†</sup>, [Ruofan Liang](https://nexuslrf.github.io/)<sup>3</sup>, [Lingxi Xie](http://lingxixie.com/Home.html)<sup>2</sup>, [Xiaopeng Zhang](https://sites.google.com/site/zxphistory/)<sup>2</sup>, [Wei Shen](https://shenwei1231.github.io/)<sup>1✉</sup>, [Qi Tian](https://www.qitian1987.com/)<sup>2</sup>    
+<sup>1</sup>MoE Key Lab of Artificial Intelligence, AI Institute, SJTU &emsp; <sup>2</sup>Huawei Inc. &emsp; <sup>3</sup>University of Toronto    
+<sup>*</sup>Equal contribution. &emsp; <sup>†</sup>Project lead. &emsp; <sup>✉</sup>Corresponding author.
 
 ##  🚩 News 
 - 🤖 We provide a [step-by-step guideline](#-try-your-casually-captured-data) for COLMAP-free GaussianObject. Now you can use GaussianObject to reconstruct arbitary captured objects!
