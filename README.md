@@ -19,7 +19,7 @@
 
 ---
 
-https://github.com/user-attachments/assets/c144b4f8-d21c-4fae-a785-39a21c0fb66a
+https://github.com/user-attachments/assets/a388150a-2f90-4ced-ad90-d4aac48c39dc
 
 We propose GaussianObject, a framework to represent and render the 3D object with Gaussian splatting, that achieves high rendering quality with only **4 input images** even under **COLMAP-free** conditions.
 
