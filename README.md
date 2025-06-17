@@ -146,8 +146,8 @@ The visual hull is saved in `data/mip360/kitchen/visual_hull_4.ply`.
 
 ### Coarse 3DGS
 <details>
-<summary>
-Train script:</summary>
+<summary>Train script:</summary>
+
 ```sh
 python train_gs.py -s data/mip360/kitchen \
     -m output/gs_init/kitchen \
